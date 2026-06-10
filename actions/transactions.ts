@@ -1,7 +1,6 @@
 "use server";
 
 import { sql, query } from "@/lib/db";
-import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import type { Transaction, TransactionFilters, MonthlySummary, DashboardStats } from "@/lib/types";
 
@@ -18,11 +17,6 @@ const transactionSchema = z.object({
 
 export type TransactionFormData = z.infer<typeof transactionSchema>;
 
-function revalidateAll() {
-  revalidatePath("/");
-  revalidatePath("/transactions");
-  revalidatePath("/reports");
-}
 
 export async function getTransactions(
   filters: TransactionFilters = {},
@@ -141,7 +135,6 @@ export async function createTransaction(formData: TransactionFormData): Promise<
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [date, direction, amount, counterparty, description ?? null, transaction_reference ?? null, fees ?? 0, notes ?? null]
     );
-    revalidateAll();
     return {};
   } catch (e) {
     return { error: String(e) };
@@ -159,7 +152,6 @@ export async function updateTransaction(id: string, formData: TransactionFormDat
        description=$5, transaction_reference=$6, fees=$7, notes=$8 WHERE id=$9`,
       [date, direction, amount, counterparty, description ?? null, transaction_reference ?? null, fees ?? 0, notes ?? null, id]
     );
-    revalidateAll();
     return {};
   } catch (e) {
     return { error: String(e) };
@@ -169,7 +161,6 @@ export async function updateTransaction(id: string, formData: TransactionFormDat
 export async function deleteTransaction(id: string): Promise<{ error?: string }> {
   try {
     await query(`DELETE FROM transactions WHERE id=$1`, [id]);
-    revalidateAll();
     return {};
   } catch (e) {
     return { error: String(e) };

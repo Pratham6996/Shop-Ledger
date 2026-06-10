@@ -1,6 +1,13 @@
 import { neon } from "@neondatabase/serverless";
 
-const _sql = neon(process.env.DATABASE_URL!);
+// Strip channel_binding param — not supported by the HTTP driver
+const rawUrl = process.env.DATABASE_URL ?? "";
+const cleanUrl = rawUrl
+  .replace("channel_binding=require&", "")
+  .replace("&channel_binding=require", "")
+  .replace("?channel_binding=require", "");
+
+const _sql = neon(cleanUrl);
 
 // Tagged template for static queries: sql`SELECT ...`
 export const sql = _sql;
