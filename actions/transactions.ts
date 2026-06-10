@@ -1,6 +1,6 @@
 "use server";
 
-import { sql, query } from "@/lib/db";
+import { sql } from "@/lib/db";
 import { z } from "zod";
 import type { Transaction, TransactionFilters, MonthlySummary, DashboardStats } from "@/lib/types";
 
@@ -17,32 +17,36 @@ const transactionSchema = z.object({
 
 export type TransactionFormData = z.infer<typeof transactionSchema>;
 
-
 export async function getTransactions(
   filters: TransactionFilters = {},
   page = 1,
   pageSize = 20
 ): Promise<{ data: Transaction[]; count: number; error?: string }> {
   try {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-    let idx = 1;
-
-    if (filters.search) { conditions.push(`counterparty ILIKE $${idx++}`); params.push(`%${filters.search}%`); }
-    if (filters.direction && filters.direction !== "all") { conditions.push(`direction = $${idx++}`); params.push(filters.direction); }
-    if (filters.dateFrom) { conditions.push(`date >= $${idx++}`); params.push(filters.dateFrom); }
-    if (filters.dateTo) { conditions.push(`date <= $${idx++}`); params.push(filters.dateTo); }
-
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const search = filters.search ? `%${filters.search}%` : null;
+    const direction = (filters.direction && filters.direction !== "all") ? filters.direction : null;
+    const dateFrom = filters.dateFrom ?? null;
+    const dateTo = filters.dateTo ?? null;
     const offset = (page - 1) * pageSize;
 
-    const countRows = await query(`SELECT COUNT(*) AS cnt FROM transactions ${where}`, params);
+    const countRows = await sql`
+      SELECT COUNT(*) AS cnt FROM transactions
+      WHERE (${ search }::text IS NULL OR counterparty ILIKE ${ search })
+        AND (${ direction }::text IS NULL OR direction = ${ direction })
+        AND (${ dateFrom }::date IS NULL OR date >= ${ dateFrom }::date)
+        AND (${ dateTo }::date IS NULL OR date <= ${ dateTo }::date)
+    `;
     const count = parseInt(String(countRows[0].cnt), 10);
 
-    const rows = await query(
-      `SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
-      [...params, pageSize, offset]
-    );
+    const rows = await sql`
+      SELECT * FROM transactions
+      WHERE (${ search }::text IS NULL OR counterparty ILIKE ${ search })
+        AND (${ direction }::text IS NULL OR direction = ${ direction })
+        AND (${ dateFrom }::date IS NULL OR date >= ${ dateFrom }::date)
+        AND (${ dateTo }::date IS NULL OR date <= ${ dateTo }::date)
+      ORDER BY date DESC, created_at DESC
+      LIMIT ${ pageSize } OFFSET ${ offset }
+    `;
 
     return { data: rows as unknown as Transaction[], count };
   } catch (e) {
@@ -54,17 +58,19 @@ export async function getAllTransactionsForExport(
   filters: TransactionFilters = {}
 ): Promise<{ data: Transaction[]; error?: string }> {
   try {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-    let idx = 1;
+    const search = filters.search ? `%${filters.search}%` : null;
+    const direction = (filters.direction && filters.direction !== "all") ? filters.direction : null;
+    const dateFrom = filters.dateFrom ?? null;
+    const dateTo = filters.dateTo ?? null;
 
-    if (filters.search) { conditions.push(`counterparty ILIKE $${idx++}`); params.push(`%${filters.search}%`); }
-    if (filters.direction && filters.direction !== "all") { conditions.push(`direction = $${idx++}`); params.push(filters.direction); }
-    if (filters.dateFrom) { conditions.push(`date >= $${idx++}`); params.push(filters.dateFrom); }
-    if (filters.dateTo) { conditions.push(`date <= $${idx++}`); params.push(filters.dateTo); }
-
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const rows = await query(`SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC`, params);
+    const rows = await sql`
+      SELECT * FROM transactions
+      WHERE (${ search }::text IS NULL OR counterparty ILIKE ${ search })
+        AND (${ direction }::text IS NULL OR direction = ${ direction })
+        AND (${ dateFrom }::date IS NULL OR date >= ${ dateFrom }::date)
+        AND (${ dateTo }::date IS NULL OR date <= ${ dateTo }::date)
+      ORDER BY date DESC, created_at DESC
+    `;
     return { data: rows as unknown as Transaction[] };
   } catch (e) {
     return { data: [], error: String(e) };
@@ -89,9 +95,11 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   }
 }
 
-export async function getRecentTransactions(limit = 5): Promise<Transaction[]> {
+export async function getRecentTransactions(limit = 8): Promise<Transaction[]> {
   try {
-    const rows = await query(`SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT $1`, [limit]);
+    const rows = await sql`
+      SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT ${ limit }
+    `;
     return rows as unknown as Transaction[];
   } catch {
     return [];
@@ -130,11 +138,10 @@ export async function createTransaction(formData: TransactionFormData): Promise<
 
   const { date, direction, amount, counterparty, description, transaction_reference, fees, notes } = parsed.data;
   try {
-    await query(
-      `INSERT INTO transactions (date, direction, amount, counterparty, description, transaction_reference, fees, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [date, direction, amount, counterparty, description ?? null, transaction_reference ?? null, fees ?? 0, notes ?? null]
-    );
+    await sql`
+      INSERT INTO transactions (date, direction, amount, counterparty, description, transaction_reference, fees, notes)
+      VALUES (${ date }, ${ direction }, ${ amount }, ${ counterparty }, ${ description ?? null }, ${ transaction_reference ?? null }, ${ fees ?? 0 }, ${ notes ?? null })
+    `;
     return {};
   } catch (e) {
     return { error: String(e) };
@@ -147,11 +154,13 @@ export async function updateTransaction(id: string, formData: TransactionFormDat
 
   const { date, direction, amount, counterparty, description, transaction_reference, fees, notes } = parsed.data;
   try {
-    await query(
-      `UPDATE transactions SET date=$1, direction=$2, amount=$3, counterparty=$4,
-       description=$5, transaction_reference=$6, fees=$7, notes=$8 WHERE id=$9`,
-      [date, direction, amount, counterparty, description ?? null, transaction_reference ?? null, fees ?? 0, notes ?? null, id]
-    );
+    await sql`
+      UPDATE transactions
+      SET date=${ date }, direction=${ direction }, amount=${ amount }, counterparty=${ counterparty },
+          description=${ description ?? null }, transaction_reference=${ transaction_reference ?? null },
+          fees=${ fees ?? 0 }, notes=${ notes ?? null }
+      WHERE id=${ id }
+    `;
     return {};
   } catch (e) {
     return { error: String(e) };
@@ -160,7 +169,7 @@ export async function updateTransaction(id: string, formData: TransactionFormDat
 
 export async function deleteTransaction(id: string): Promise<{ error?: string }> {
   try {
-    await query(`DELETE FROM transactions WHERE id=$1`, [id]);
+    await sql`DELETE FROM transactions WHERE id=${ id }`;
     return {};
   } catch (e) {
     return { error: String(e) };
