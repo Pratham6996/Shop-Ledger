@@ -1,6 +1,6 @@
 "use server";
 
-import { sql } from "@/lib/db";
+import { sql, query } from "@/lib/db";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import type { Transaction, TransactionFilters, MonthlySummary, DashboardStats } from "@/lib/types";
@@ -34,38 +34,23 @@ export async function getTransactions(
     const params: unknown[] = [];
     let idx = 1;
 
-    if (filters.search) {
-      conditions.push(`counterparty ILIKE $${idx++}`);
-      params.push(`%${filters.search}%`);
-    }
-    if (filters.direction && filters.direction !== "all") {
-      conditions.push(`direction = $${idx++}`);
-      params.push(filters.direction);
-    }
-    if (filters.dateFrom) {
-      conditions.push(`date >= $${idx++}`);
-      params.push(filters.dateFrom);
-    }
-    if (filters.dateTo) {
-      conditions.push(`date <= $${idx++}`);
-      params.push(filters.dateTo);
-    }
+    if (filters.search) { conditions.push(`counterparty ILIKE $${idx++}`); params.push(`%${filters.search}%`); }
+    if (filters.direction && filters.direction !== "all") { conditions.push(`direction = $${idx++}`); params.push(filters.direction); }
+    if (filters.dateFrom) { conditions.push(`date >= $${idx++}`); params.push(filters.dateFrom); }
+    if (filters.dateTo) { conditions.push(`date <= $${idx++}`); params.push(filters.dateTo); }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const offset = (page - 1) * pageSize;
 
-    const countResult = await sql.query(
-      `SELECT COUNT(*) FROM transactions ${where}`,
-      params
-    );
-    const count = parseInt(countResult.rows[0].count, 10);
+    const countRows = await query(`SELECT COUNT(*) AS cnt FROM transactions ${where}`, params);
+    const count = parseInt(String(countRows[0].cnt), 10);
 
-    const dataResult = await sql.query(
-      `SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
+    const rows = await query(
+      `SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
       [...params, pageSize, offset]
     );
 
-    return { data: dataResult.rows as Transaction[], count };
+    return { data: rows as unknown as Transaction[], count };
   } catch (e) {
     return { data: [], count: 0, error: String(e) };
   }
@@ -85,11 +70,8 @@ export async function getAllTransactionsForExport(
     if (filters.dateTo) { conditions.push(`date <= $${idx++}`); params.push(filters.dateTo); }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const result = await sql.query(
-      `SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC`,
-      params
-    );
-    return { data: result.rows as Transaction[] };
+    const rows = await query(`SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC`, params);
+    return { data: rows as unknown as Transaction[] };
   } catch (e) {
     return { data: [], error: String(e) };
   }
@@ -97,22 +79,17 @@ export async function getAllTransactionsForExport(
 
 export async function getDashboardStats(): Promise<DashboardStats> {
   try {
-    const result = await sql`
+    const rows = await sql`
       SELECT
         COALESCE(SUM(CASE WHEN direction='received' THEN amount - COALESCE(fees,0) ELSE 0 END), 0) AS total_received,
         COALESCE(SUM(CASE WHEN direction='sent'     THEN amount - COALESCE(fees,0) ELSE 0 END), 0) AS total_sent,
         COUNT(*) AS transaction_count
       FROM transactions
     `;
-    const row = result.rows[0];
-    const totalReceived = parseFloat(row.total_received);
-    const totalSent = parseFloat(row.total_sent);
-    return {
-      totalReceived,
-      totalSent,
-      netBalance: totalReceived - totalSent,
-      transactionCount: parseInt(row.transaction_count, 10),
-    };
+    const row = rows[0];
+    const totalReceived = parseFloat(String(row.total_received));
+    const totalSent = parseFloat(String(row.total_sent));
+    return { totalReceived, totalSent, netBalance: totalReceived - totalSent, transactionCount: parseInt(String(row.transaction_count), 10) };
   } catch {
     return { totalReceived: 0, totalSent: 0, netBalance: 0, transactionCount: 0 };
   }
@@ -120,11 +97,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 
 export async function getRecentTransactions(limit = 5): Promise<Transaction[]> {
   try {
-    const result = await sql.query(
-      `SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT $1`,
-      [limit]
-    );
-    return result.rows as Transaction[];
+    const rows = await query(`SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT $1`, [limit]);
+    return rows as unknown as Transaction[];
   } catch {
     return [];
   }
@@ -132,7 +106,7 @@ export async function getRecentTransactions(limit = 5): Promise<Transaction[]> {
 
 export async function getMonthlySummaries(): Promise<MonthlySummary[]> {
   try {
-    const result = await sql`
+    const rows = await sql`
       SELECT
         TO_CHAR(date, 'MM') AS month,
         EXTRACT(YEAR FROM date)::int AS year,
@@ -143,31 +117,30 @@ export async function getMonthlySummaries(): Promise<MonthlySummary[]> {
       GROUP BY TO_CHAR(date, 'MM'), EXTRACT(YEAR FROM date)
       ORDER BY year DESC, month DESC
     `;
-    return result.rows.map((r) => ({
-      month: r.month,
-      year: r.year,
-      totalReceived: parseFloat(r.total_received),
-      totalSent: parseFloat(r.total_sent),
-      netBalance: parseFloat(r.total_received) - parseFloat(r.total_sent),
-      count: parseInt(r.count, 10),
+    return rows.map((r) => ({
+      month: String(r.month),
+      year: Number(r.year),
+      totalReceived: parseFloat(String(r.total_received)),
+      totalSent: parseFloat(String(r.total_sent)),
+      netBalance: parseFloat(String(r.total_received)) - parseFloat(String(r.total_sent)),
+      count: parseInt(String(r.count), 10),
     }));
   } catch {
     return [];
   }
 }
 
-export async function createTransaction(
-  formData: TransactionFormData
-): Promise<{ error?: string }> {
+export async function createTransaction(formData: TransactionFormData): Promise<{ error?: string }> {
   const parsed = transactionSchema.safeParse(formData);
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
   const { date, direction, amount, counterparty, description, transaction_reference, fees, notes } = parsed.data;
   try {
-    await sql`
-      INSERT INTO transactions (date, direction, amount, counterparty, description, transaction_reference, fees, notes)
-      VALUES (${date}, ${direction}, ${amount}, ${counterparty}, ${description ?? null}, ${transaction_reference ?? null}, ${fees ?? 0}, ${notes ?? null})
-    `;
+    await query(
+      `INSERT INTO transactions (date, direction, amount, counterparty, description, transaction_reference, fees, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [date, direction, amount, counterparty, description ?? null, transaction_reference ?? null, fees ?? 0, notes ?? null]
+    );
     revalidateAll();
     return {};
   } catch (e) {
@@ -175,22 +148,17 @@ export async function createTransaction(
   }
 }
 
-export async function updateTransaction(
-  id: string,
-  formData: TransactionFormData
-): Promise<{ error?: string }> {
+export async function updateTransaction(id: string, formData: TransactionFormData): Promise<{ error?: string }> {
   const parsed = transactionSchema.safeParse(formData);
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
   const { date, direction, amount, counterparty, description, transaction_reference, fees, notes } = parsed.data;
   try {
-    await sql`
-      UPDATE transactions
-      SET date=${date}, direction=${direction}, amount=${amount}, counterparty=${counterparty},
-          description=${description ?? null}, transaction_reference=${transaction_reference ?? null},
-          fees=${fees ?? 0}, notes=${notes ?? null}
-      WHERE id=${id}
-    `;
+    await query(
+      `UPDATE transactions SET date=$1, direction=$2, amount=$3, counterparty=$4,
+       description=$5, transaction_reference=$6, fees=$7, notes=$8 WHERE id=$9`,
+      [date, direction, amount, counterparty, description ?? null, transaction_reference ?? null, fees ?? 0, notes ?? null, id]
+    );
     revalidateAll();
     return {};
   } catch (e) {
@@ -200,7 +168,7 @@ export async function updateTransaction(
 
 export async function deleteTransaction(id: string): Promise<{ error?: string }> {
   try {
-    await sql`DELETE FROM transactions WHERE id=${id}`;
+    await query(`DELETE FROM transactions WHERE id=$1`, [id]);
     revalidateAll();
     return {};
   } catch (e) {
