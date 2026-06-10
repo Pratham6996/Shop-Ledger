@@ -1,13 +1,13 @@
 "use server";
 
-import { createClient } from "@/lib/supabase/server";
+import { sql } from "@/lib/db";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import type { Transaction, TransactionFilters, MonthlySummary, DashboardStats } from "@/lib/types";
 
 const transactionSchema = z.object({
   date: z.string().min(1, "Date is required"),
-  direction: z.enum(["received", "sent"]),
+  direction: z.enum(["received", "sent"], { message: "Direction is required" }),
   amount: z.coerce.number().positive("Amount must be greater than zero"),
   counterparty: z.string().min(1, "Counterparty is required"),
   description: z.string().optional().nullable(),
@@ -18,145 +18,161 @@ const transactionSchema = z.object({
 
 export type TransactionFormData = z.infer<typeof transactionSchema>;
 
+function revalidateAll() {
+  revalidatePath("/");
+  revalidatePath("/transactions");
+  revalidatePath("/reports");
+}
+
 export async function getTransactions(
   filters: TransactionFilters = {},
   page = 1,
   pageSize = 20
 ): Promise<{ data: Transaction[]; count: number; error?: string }> {
-  const supabase = await createClient();
+  try {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
 
-  let query = supabase
-    .from("transactions")
-    .select("*", { count: "exact" })
-    .order("date", { ascending: false })
-    .order("created_at", { ascending: false });
+    if (filters.search) {
+      conditions.push(`counterparty ILIKE $${idx++}`);
+      params.push(`%${filters.search}%`);
+    }
+    if (filters.direction && filters.direction !== "all") {
+      conditions.push(`direction = $${idx++}`);
+      params.push(filters.direction);
+    }
+    if (filters.dateFrom) {
+      conditions.push(`date >= $${idx++}`);
+      params.push(filters.dateFrom);
+    }
+    if (filters.dateTo) {
+      conditions.push(`date <= $${idx++}`);
+      params.push(filters.dateTo);
+    }
 
-  if (filters.search) {
-    query = query.ilike("counterparty", `%${filters.search}%`);
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const offset = (page - 1) * pageSize;
+
+    const countResult = await sql.query(
+      `SELECT COUNT(*) FROM transactions ${where}`,
+      params
+    );
+    const count = parseInt(countResult.rows[0].count, 10);
+
+    const dataResult = await sql.query(
+      `SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
+      [...params, pageSize, offset]
+    );
+
+    return { data: dataResult.rows as Transaction[], count };
+  } catch (e) {
+    return { data: [], count: 0, error: String(e) };
   }
-  if (filters.direction && filters.direction !== "all") {
-    query = query.eq("direction", filters.direction);
-  }
-  if (filters.dateFrom) {
-    query = query.gte("date", filters.dateFrom);
-  }
-  if (filters.dateTo) {
-    query = query.lte("date", filters.dateTo);
-  }
-
-  const from = (page - 1) * pageSize;
-  const to = from + pageSize - 1;
-  query = query.range(from, to);
-
-  const { data, error, count } = await query;
-
-  if (error) return { data: [], count: 0, error: error.message };
-  return { data: data as Transaction[], count: count ?? 0 };
 }
 
 export async function getAllTransactionsForExport(
   filters: TransactionFilters = {}
 ): Promise<{ data: Transaction[]; error?: string }> {
-  const supabase = await createClient();
+  try {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
 
-  let query = supabase
-    .from("transactions")
-    .select("*")
-    .order("date", { ascending: false });
+    if (filters.search) { conditions.push(`counterparty ILIKE $${idx++}`); params.push(`%${filters.search}%`); }
+    if (filters.direction && filters.direction !== "all") { conditions.push(`direction = $${idx++}`); params.push(filters.direction); }
+    if (filters.dateFrom) { conditions.push(`date >= $${idx++}`); params.push(filters.dateFrom); }
+    if (filters.dateTo) { conditions.push(`date <= $${idx++}`); params.push(filters.dateTo); }
 
-  if (filters.search) query = query.ilike("counterparty", `%${filters.search}%`);
-  if (filters.direction && filters.direction !== "all") query = query.eq("direction", filters.direction);
-  if (filters.dateFrom) query = query.gte("date", filters.dateFrom);
-  if (filters.dateTo) query = query.lte("date", filters.dateTo);
-
-  const { data, error } = await query;
-  if (error) return { data: [], error: error.message };
-  return { data: data as Transaction[] };
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const result = await sql.query(
+      `SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC`,
+      params
+    );
+    return { data: result.rows as Transaction[] };
+  } catch (e) {
+    return { data: [], error: String(e) };
+  }
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {
-  const supabase = await createClient();
-
-  const { data } = await supabase
-    .from("transactions")
-    .select("direction, amount, fees");
-
-  if (!data) return { totalReceived: 0, totalSent: 0, netBalance: 0, transactionCount: 0 };
-
-  let totalReceived = 0;
-  let totalSent = 0;
-
-  for (const t of data) {
-    const net = (t.amount ?? 0) - (t.fees ?? 0);
-    if (t.direction === "received") totalReceived += net;
-    else totalSent += net;
+  try {
+    const result = await sql`
+      SELECT
+        COALESCE(SUM(CASE WHEN direction='received' THEN amount - COALESCE(fees,0) ELSE 0 END), 0) AS total_received,
+        COALESCE(SUM(CASE WHEN direction='sent'     THEN amount - COALESCE(fees,0) ELSE 0 END), 0) AS total_sent,
+        COUNT(*) AS transaction_count
+      FROM transactions
+    `;
+    const row = result.rows[0];
+    const totalReceived = parseFloat(row.total_received);
+    const totalSent = parseFloat(row.total_sent);
+    return {
+      totalReceived,
+      totalSent,
+      netBalance: totalReceived - totalSent,
+      transactionCount: parseInt(row.transaction_count, 10),
+    };
+  } catch {
+    return { totalReceived: 0, totalSent: 0, netBalance: 0, transactionCount: 0 };
   }
-
-  return {
-    totalReceived,
-    totalSent,
-    netBalance: totalReceived - totalSent,
-    transactionCount: data.length,
-  };
 }
 
 export async function getRecentTransactions(limit = 5): Promise<Transaction[]> {
-  const supabase = await createClient();
-  const { data } = await supabase
-    .from("transactions")
-    .select("*")
-    .order("date", { ascending: false })
-    .order("created_at", { ascending: false })
-    .limit(limit);
-  return (data as Transaction[]) ?? [];
+  try {
+    const result = await sql.query(
+      `SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT $1`,
+      [limit]
+    );
+    return result.rows as Transaction[];
+  } catch {
+    return [];
+  }
 }
 
 export async function getMonthlySummaries(): Promise<MonthlySummary[]> {
-  const supabase = await createClient();
-  const { data } = await supabase
-    .from("transactions")
-    .select("date, direction, amount, fees")
-    .order("date", { ascending: false });
-
-  if (!data) return [];
-
-  const map = new Map<string, MonthlySummary>();
-
-  for (const t of data) {
-    const [year, month] = t.date.split("-");
-    const key = `${year}-${month}`;
-
-    if (!map.has(key)) {
-      map.set(key, { month, year: parseInt(year), totalReceived: 0, totalSent: 0, netBalance: 0, count: 0 });
-    }
-
-    const entry = map.get(key)!;
-    const net = (t.amount ?? 0) - (t.fees ?? 0);
-    if (t.direction === "received") entry.totalReceived += net;
-    else entry.totalSent += net;
-    entry.netBalance = entry.totalReceived - entry.totalSent;
-    entry.count += 1;
+  try {
+    const result = await sql`
+      SELECT
+        TO_CHAR(date, 'MM') AS month,
+        EXTRACT(YEAR FROM date)::int AS year,
+        COALESCE(SUM(CASE WHEN direction='received' THEN amount - COALESCE(fees,0) ELSE 0 END), 0) AS total_received,
+        COALESCE(SUM(CASE WHEN direction='sent'     THEN amount - COALESCE(fees,0) ELSE 0 END), 0) AS total_sent,
+        COUNT(*) AS count
+      FROM transactions
+      GROUP BY TO_CHAR(date, 'MM'), EXTRACT(YEAR FROM date)
+      ORDER BY year DESC, month DESC
+    `;
+    return result.rows.map((r) => ({
+      month: r.month,
+      year: r.year,
+      totalReceived: parseFloat(r.total_received),
+      totalSent: parseFloat(r.total_sent),
+      netBalance: parseFloat(r.total_received) - parseFloat(r.total_sent),
+      count: parseInt(r.count, 10),
+    }));
+  } catch {
+    return [];
   }
-
-  return Array.from(map.values());
 }
 
 export async function createTransaction(
   formData: TransactionFormData
 ): Promise<{ error?: string }> {
   const parsed = transactionSchema.safeParse(formData);
-  if (!parsed.success) {
-    return { error: parsed.error.issues[0].message };
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+
+  const { date, direction, amount, counterparty, description, transaction_reference, fees, notes } = parsed.data;
+  try {
+    await sql`
+      INSERT INTO transactions (date, direction, amount, counterparty, description, transaction_reference, fees, notes)
+      VALUES (${date}, ${direction}, ${amount}, ${counterparty}, ${description ?? null}, ${transaction_reference ?? null}, ${fees ?? 0}, ${notes ?? null})
+    `;
+    revalidateAll();
+    return {};
+  } catch (e) {
+    return { error: String(e) };
   }
-
-  const supabase = await createClient();
-  const { error } = await supabase.from("transactions").insert([parsed.data]);
-
-  if (error) return { error: error.message };
-  revalidatePath("/");
-  revalidatePath("/transactions");
-  revalidatePath("/reports");
-  return {};
 }
 
 export async function updateTransaction(
@@ -164,30 +180,30 @@ export async function updateTransaction(
   formData: TransactionFormData
 ): Promise<{ error?: string }> {
   const parsed = transactionSchema.safeParse(formData);
-  if (!parsed.success) {
-    return { error: parsed.error.issues[0].message };
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+
+  const { date, direction, amount, counterparty, description, transaction_reference, fees, notes } = parsed.data;
+  try {
+    await sql`
+      UPDATE transactions
+      SET date=${date}, direction=${direction}, amount=${amount}, counterparty=${counterparty},
+          description=${description ?? null}, transaction_reference=${transaction_reference ?? null},
+          fees=${fees ?? 0}, notes=${notes ?? null}
+      WHERE id=${id}
+    `;
+    revalidateAll();
+    return {};
+  } catch (e) {
+    return { error: String(e) };
   }
-
-  const supabase = await createClient();
-  const { error } = await supabase
-    .from("transactions")
-    .update(parsed.data)
-    .eq("id", id);
-
-  if (error) return { error: error.message };
-  revalidatePath("/");
-  revalidatePath("/transactions");
-  revalidatePath("/reports");
-  return {};
 }
 
 export async function deleteTransaction(id: string): Promise<{ error?: string }> {
-  const supabase = await createClient();
-  const { error } = await supabase.from("transactions").delete().eq("id", id);
-
-  if (error) return { error: error.message };
-  revalidatePath("/");
-  revalidatePath("/transactions");
-  revalidatePath("/reports");
-  return {};
+  try {
+    await sql`DELETE FROM transactions WHERE id=${id}`;
+    revalidateAll();
+    return {};
+  } catch (e) {
+    return { error: String(e) };
+  }
 }
