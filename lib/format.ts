@@ -6,10 +6,16 @@ export function formatCurrency(amount: number): string {
   }).format(amount);
 }
 
-export function formatDate(dateStr: string): string {
-  const [year, month, day] = dateStr.split("-").map(Number);
-  const date = new Date(year, month - 1, day);
-  return date.toLocaleDateString("en-IN", {
+export function toDateString(date: string | Date): string {
+  if (date instanceof Date) return date.toISOString().split("T")[0];
+  return date;
+}
+
+export function formatDate(dateStr: string | Date): string {
+  const str = toDateString(dateStr);
+  const [year, month, day] = str.split("-").map(Number);
+  const d = new Date(year, month - 1, day);
+  return d.toLocaleDateString("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",

@@ -2,7 +2,17 @@
 
 import { sql } from "@/lib/db";
 import { z } from "zod";
+import { toDateString } from "@/lib/format";
 import type { Transaction, TransactionFilters, MonthlySummary, DashboardStats } from "@/lib/types";
+
+function normalizeRows(rows: Record<string, unknown>[]): Transaction[] {
+  return rows.map((r) => ({
+    ...r,
+    date: toDateString(r.date as string | Date),
+    amount: Number(r.amount),
+    fees: r.fees != null ? Number(r.fees) : null,
+  })) as Transaction[];
+}
 
 const transactionSchema = z.object({
   date: z.string().min(1, "Date is required"),
@@ -48,7 +58,7 @@ export async function getTransactions(
       LIMIT ${ pageSize } OFFSET ${ offset }
     `;
 
-    return { data: rows as unknown as Transaction[], count };
+    return { data: normalizeRows(rows as Record<string, unknown>[]), count };
   } catch (e) {
     return { data: [], count: 0, error: String(e) };
   }
@@ -71,7 +81,7 @@ export async function getAllTransactionsForExport(
         AND (${ dateTo }::date IS NULL OR date <= ${ dateTo }::date)
       ORDER BY date DESC, created_at DESC
     `;
-    return { data: rows as unknown as Transaction[] };
+    return { data: normalizeRows(rows as Record<string, unknown>[]) };
   } catch (e) {
     return { data: [], error: String(e) };
   }
@@ -100,7 +110,7 @@ export async function getRecentTransactions(limit = 8): Promise<Transaction[]> {
     const rows = await sql`
       SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT ${ limit }
     `;
-    return rows as unknown as Transaction[];
+    return normalizeRows(rows as Record<string, unknown>[]);
   } catch {
     return [];
   }
