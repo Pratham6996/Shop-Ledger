@@ -5,15 +5,6 @@ import { z } from "zod";
 import { toDateString } from "@/lib/format";
 import type { Transaction, TransactionFilters, MonthlySummary, DashboardStats } from "@/lib/types";
 
-function normalizeRows(rows: Record<string, unknown>[]): Transaction[] {
-  return rows.map((r) => ({
-    ...r,
-    date: toDateString(r.date as string | Date),
-    amount: Number(r.amount),
-    fees: r.fees != null ? Number(r.fees) : null,
-  })) as Transaction[];
-}
-
 const transactionSchema = z.object({
   date: z.string().min(1, "Date is required"),
   direction: z.enum(["received", "sent"], { message: "Direction is required" }),
@@ -27,38 +18,42 @@ const transactionSchema = z.object({
 
 export type TransactionFormData = z.infer<typeof transactionSchema>;
 
+function normalizeRows(rows: Record<string, unknown>[]): Transaction[] {
+  return rows.map((r) => ({
+    ...r,
+    date: toDateString(r.date as string | Date),
+    amount: Number(r.amount),
+    fees: r.fees != null ? Number(r.fees) : null,
+  })) as Transaction[];
+}
+
 export async function getTransactions(
   filters: TransactionFilters = {},
   page = 1,
   pageSize = 20
 ): Promise<{ data: Transaction[]; count: number; error?: string }> {
   try {
-    const search = filters.search ? `%${filters.search}%` : null;
-    const direction = (filters.direction && filters.direction !== "all") ? filters.direction : null;
-    const dateFrom = filters.dateFrom ?? null;
-    const dateTo = filters.dateTo ?? null;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let i = 1;
+
+    if (filters.search) { conditions.push(`counterparty ILIKE $${i++}`); params.push(`%${filters.search}%`); }
+    if (filters.direction && filters.direction !== "all") { conditions.push(`direction = $${i++}`); params.push(filters.direction); }
+    if (filters.dateFrom) { conditions.push(`date >= $${i++}`); params.push(filters.dateFrom); }
+    if (filters.dateTo) { conditions.push(`date <= $${i++}`); params.push(filters.dateTo); }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const offset = (page - 1) * pageSize;
 
-    const countRows = await sql`
-      SELECT COUNT(*) AS cnt FROM transactions
-      WHERE (${ search }::text IS NULL OR counterparty ILIKE ${ search })
-        AND (${ direction }::text IS NULL OR direction = ${ direction })
-        AND (${ dateFrom }::date IS NULL OR date >= ${ dateFrom }::date)
-        AND (${ dateTo }::date IS NULL OR date <= ${ dateTo }::date)
-    `;
-    const count = parseInt(String(countRows[0].cnt), 10);
+    const countResult = await sql.query(`SELECT COUNT(*) AS cnt FROM transactions ${where}`, params);
+    const count = parseInt(String(countResult[0].cnt), 10);
 
-    const rows = await sql`
-      SELECT * FROM transactions
-      WHERE (${ search }::text IS NULL OR counterparty ILIKE ${ search })
-        AND (${ direction }::text IS NULL OR direction = ${ direction })
-        AND (${ dateFrom }::date IS NULL OR date >= ${ dateFrom }::date)
-        AND (${ dateTo }::date IS NULL OR date <= ${ dateTo }::date)
-      ORDER BY date DESC, created_at DESC
-      LIMIT ${ pageSize } OFFSET ${ offset }
-    `;
+    const dataResult = await sql.query(
+      `SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC LIMIT $${i} OFFSET $${i + 1}`,
+      [...params, pageSize, offset]
+    );
 
-    return { data: normalizeRows(rows as Record<string, unknown>[]), count };
+    return { data: normalizeRows(dataResult), count };
   } catch (e) {
     return { data: [], count: 0, error: String(e) };
   }
@@ -68,20 +63,18 @@ export async function getAllTransactionsForExport(
   filters: TransactionFilters = {}
 ): Promise<{ data: Transaction[]; error?: string }> {
   try {
-    const search = filters.search ? `%${filters.search}%` : null;
-    const direction = (filters.direction && filters.direction !== "all") ? filters.direction : null;
-    const dateFrom = filters.dateFrom ?? null;
-    const dateTo = filters.dateTo ?? null;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let i = 1;
 
-    const rows = await sql`
-      SELECT * FROM transactions
-      WHERE (${ search }::text IS NULL OR counterparty ILIKE ${ search })
-        AND (${ direction }::text IS NULL OR direction = ${ direction })
-        AND (${ dateFrom }::date IS NULL OR date >= ${ dateFrom }::date)
-        AND (${ dateTo }::date IS NULL OR date <= ${ dateTo }::date)
-      ORDER BY date DESC, created_at DESC
-    `;
-    return { data: normalizeRows(rows as Record<string, unknown>[]) };
+    if (filters.search) { conditions.push(`counterparty ILIKE $${i++}`); params.push(`%${filters.search}%`); }
+    if (filters.direction && filters.direction !== "all") { conditions.push(`direction = $${i++}`); params.push(filters.direction); }
+    if (filters.dateFrom) { conditions.push(`date >= $${i++}`); params.push(filters.dateFrom); }
+    if (filters.dateTo) { conditions.push(`date <= $${i++}`); params.push(filters.dateTo); }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const result = await sql.query(`SELECT * FROM transactions ${where} ORDER BY date DESC, created_at DESC`, params);
+    return { data: normalizeRows(result) };
   } catch (e) {
     return { data: [], error: String(e) };
   }
@@ -89,14 +82,14 @@ export async function getAllTransactionsForExport(
 
 export async function getDashboardStats(): Promise<DashboardStats> {
   try {
-    const rows = await sql`
+    const result = await sql.query(`
       SELECT
         COALESCE(SUM(CASE WHEN direction='received' THEN amount - COALESCE(fees,0) ELSE 0 END), 0) AS total_received,
         COALESCE(SUM(CASE WHEN direction='sent'     THEN amount - COALESCE(fees,0) ELSE 0 END), 0) AS total_sent,
         COUNT(*) AS transaction_count
       FROM transactions
-    `;
-    const row = rows[0];
+    `);
+    const row = result[0];
     const totalReceived = parseFloat(String(row.total_received));
     const totalSent = parseFloat(String(row.total_sent));
     return { totalReceived, totalSent, netBalance: totalReceived - totalSent, transactionCount: parseInt(String(row.transaction_count), 10) };
@@ -107,10 +100,11 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 
 export async function getRecentTransactions(limit = 8): Promise<Transaction[]> {
   try {
-    const rows = await sql`
-      SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT ${ limit }
-    `;
-    return normalizeRows(rows as Record<string, unknown>[]);
+    const result = await sql.query(
+      `SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT $1`,
+      [limit]
+    );
+    return normalizeRows(result);
   } catch {
     return [];
   }
@@ -118,7 +112,7 @@ export async function getRecentTransactions(limit = 8): Promise<Transaction[]> {
 
 export async function getMonthlySummaries(): Promise<MonthlySummary[]> {
   try {
-    const rows = await sql`
+    const result = await sql.query(`
       SELECT
         TO_CHAR(date, 'MM') AS month,
         EXTRACT(YEAR FROM date)::int AS year,
@@ -128,8 +122,8 @@ export async function getMonthlySummaries(): Promise<MonthlySummary[]> {
       FROM transactions
       GROUP BY TO_CHAR(date, 'MM'), EXTRACT(YEAR FROM date)
       ORDER BY year DESC, month DESC
-    `;
-    return rows.map((r) => ({
+    `);
+    return result.map((r) => ({
       month: String(r.month),
       year: Number(r.year),
       totalReceived: parseFloat(String(r.total_received)),
@@ -148,10 +142,11 @@ export async function createTransaction(formData: TransactionFormData): Promise<
 
   const { date, direction, amount, counterparty, description, transaction_reference, fees, notes } = parsed.data;
   try {
-    await sql`
-      INSERT INTO transactions (date, direction, amount, counterparty, description, transaction_reference, fees, notes)
-      VALUES (${ date }, ${ direction }, ${ amount }, ${ counterparty }, ${ description ?? null }, ${ transaction_reference ?? null }, ${ fees ?? 0 }, ${ notes ?? null })
-    `;
+    await sql.query(
+      `INSERT INTO transactions (date, direction, amount, counterparty, description, transaction_reference, fees, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [date, direction, amount, counterparty, description ?? null, transaction_reference ?? null, fees ?? 0, notes ?? null]
+    );
     return {};
   } catch (e) {
     return { error: String(e) };
@@ -164,13 +159,11 @@ export async function updateTransaction(id: string, formData: TransactionFormDat
 
   const { date, direction, amount, counterparty, description, transaction_reference, fees, notes } = parsed.data;
   try {
-    await sql`
-      UPDATE transactions
-      SET date=${ date }, direction=${ direction }, amount=${ amount }, counterparty=${ counterparty },
-          description=${ description ?? null }, transaction_reference=${ transaction_reference ?? null },
-          fees=${ fees ?? 0 }, notes=${ notes ?? null }
-      WHERE id=${ id }
-    `;
+    await sql.query(
+      `UPDATE transactions SET date=$1, direction=$2, amount=$3, counterparty=$4,
+       description=$5, transaction_reference=$6, fees=$7, notes=$8 WHERE id=$9`,
+      [date, direction, amount, counterparty, description ?? null, transaction_reference ?? null, fees ?? 0, notes ?? null, id]
+    );
     return {};
   } catch (e) {
     return { error: String(e) };
@@ -179,7 +172,7 @@ export async function updateTransaction(id: string, formData: TransactionFormDat
 
 export async function deleteTransaction(id: string): Promise<{ error?: string }> {
   try {
-    await sql`DELETE FROM transactions WHERE id=${ id }`;
+    await sql.query(`DELETE FROM transactions WHERE id=$1`, [id]);
     return {};
   } catch (e) {
     return { error: String(e) };

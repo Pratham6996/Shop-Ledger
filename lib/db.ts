@@ -1,6 +1,5 @@
 import { neon } from "@neondatabase/serverless";
 
-// Strip channel_binding param — not supported by the HTTP driver
 const rawUrl = process.env.DATABASE_URL ?? "";
 const cleanUrl = rawUrl
   .replace("channel_binding=require&", "")
